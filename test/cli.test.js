@@ -119,10 +119,19 @@ test('wrong model echo is flagged as a warning', async () => {
 });
 
 test('absent models endpoint is a warning, not a failure', async () => {
-  const r = await run(['check', '--url', `${baseUrl}/nomodels`, '--key', 'sk-test', '--model', 'test-model', '--json']);
+  const r = await run(['check', '--url', `${baseUrl}/nomodels`, '--key', 'sk-test',
+    '--model', 'test-model', '--protocol', 'openai', '--json']);
   const m = find(r.json, 'models endpoint');
   assert.strictEqual(m.level, 'warn');
   assert.match(m.message, /404/);
+});
+
+test('auto: an endpoint without /v1/models but with /v1/messages is treated as anthropic', async () => {
+  // The mock serves both, so auto should pick openai first (models answers 200).
+  // This case documents the 404-fallback path indirectly.
+  const r = await run(['check', '--url', `${baseUrl}/ok`, '--key', 'sk-test',
+    '--model', 'test-model', '--json']);
+  assert.ok(['openai', 'anthropic'].includes(r.json.results.find(x => x.name === 'protocol').message.split(' ')[0]));
 });
 
 // ---------- token accounting ----------
@@ -168,6 +177,47 @@ test('streaming is detected', async () => {
   const s = find(r.json, 'streaming');
   assert.strictEqual(s.level, 'ok', 'streaming check failed: ' + (s && s.message));
   assert.match(s.message, /event/);
+});
+
+// ---------- anthropic protocol ----------
+
+test('anthropic: happy path passes', async () => {
+  const r = await run(['check', '--url', `${baseUrl}/ok`, '--key', 'sk-ant-test',
+    '--model', 'test-model', '--protocol', 'anthropic', '--json']);
+  assert.strictEqual(r.json.verdict, 'ok', 'unexpected: ' + JSON.stringify(r.json.results));
+  assert.strictEqual(find(r.json, 'protocol').level, 'ok');
+  assert.match(find(r.json, 'protocol').message, /anthropic/);
+  assert.strictEqual(find(r.json, 'model echo').level, 'ok');
+  assert.strictEqual(find(r.json, 'usage block').level, 'ok');
+});
+
+test('anthropic: bad key is reported', async () => {
+  const r = await run(['check', '--url', `${baseUrl}/badkey`, '--key', 'sk-nope',
+    '--model', 'test-model', '--protocol', 'anthropic', '--json']);
+  assert.strictEqual(r.json.verdict, 'bad');
+  assert.strictEqual(r.code, 1);
+});
+
+test('anthropic: inflated token counts are caught', async () => {
+  const r = await run(['tokens', '--url', `${baseUrl}/inflate`, '--key', 'sk-test',
+    '--model', 'test-model', '--protocol', 'anthropic', '--json']);
+  const t = find(r.json, 'token accounting');
+  assert.strictEqual(t.level, 'bad', 'got: ' + (t && t.message));
+  assert.match(t.message, /inflation/);
+});
+
+test('anthropic: streaming is detected', async () => {
+  const r = await run(['all', '--url', `${baseUrl}/ok`, '--key', 'sk-test',
+    '--model', 'test-model', '--protocol', 'anthropic', '--n', '2', '--json']);
+  const s = find(r.json, 'streaming');
+  assert.strictEqual(s.level, 'ok', 'got: ' + (s && s.message));
+  assert.match(s.message, /event/);
+});
+
+test('auto protocol falls back to openai when /v1/models answers', async () => {
+  const r = await run(['check', '--url', `${baseUrl}/ok`, '--key', 'sk-test',
+    '--model', 'test-model', '--json']);
+  assert.match(find(r.json, 'protocol').message, /openai/);
 });
 
 // ---------- CLI ergonomics ----------

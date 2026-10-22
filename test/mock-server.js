@@ -114,6 +114,48 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, body);
   }
 
+  // /v1/messages  (Anthropic protocol)
+  if (url.endsWith('/v1/messages')) {
+    if (mode === 'badkey') return send(res, 401, { error: { message: 'bad key' } });
+
+    const raw = await readBody(req);
+    let parsed = {};
+    try { parsed = JSON.parse(raw || '{}'); } catch { /* ignore */ }
+
+    const requestedModel = parsed.model || 'test-model';
+    const content = (parsed.messages || [])
+      .map(m => (typeof m.content === 'string' ? m.content : ''))
+      .join(' ');
+    const honestPrompt = Math.max(1, Math.round(content.length / 4));
+    let promptTokens = honestPrompt;
+    if (mode === 'inflate') promptTokens = honestPrompt * 3;
+
+    if (parsed.stream) {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+      res.write('event: message_start\ndata: {"type":"message_start"}\n\n');
+      res.write('event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"OK"}}\n\n');
+      res.write('event: message_stop\ndata: {"type":"message_stop"}\n\n');
+      return res.end();
+    }
+
+    return send(res, 200, {
+      id: 'msg_mock',
+      type: 'message',
+      role: 'assistant',
+      model: mode === 'wrongmodel' ? 'cheaper-model-v1' : requestedModel,
+      content: [{ type: 'text', text: 'OK' }],
+      stop_reason: 'end_turn',
+      usage: {
+        input_tokens: promptTokens,
+        output_tokens: 2,
+      },
+    });
+  }
+
   send(res, 404, { error: { message: 'unknown path: ' + url } });
 });
 

@@ -4,7 +4,7 @@
 [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](package.json)
 [![node](https://img.shields.io/badge/node-%3E%3D18-blue)](package.json)
 
-**Test any [OI]-compatible or Anthropic-compatible API endpoint in one command.**
+**Test any [OI]-compatible or Anthropic-compatible API endpoint in one command.** Both protocols supported, auto-detected.
 
 Zero dependencies. Node 18+. Works with OpenAI, Claude, Gemini relays, or any gateway that speaks the [OI] chat-completions protocol.
 
@@ -117,6 +117,29 @@ relay-probe bench --url https://api.example.com --key sk-xxx --model gpt-4o-mini
 
 `p95` uses the correct index (`ceil(0.95 × n) − 1`), so with small samples it degrades to the maximum rather than silently returning the median. This matters: a naive `floor(0.95 × n) − 1` gives you the *minimum* when `n = 2`.
 
+### Protocol detection
+
+The tool speaks both protocols:
+
+| | [OI] | Anthropic |
+|---|---|---|
+| endpoint | `POST /v1/chat/completions` | `POST /v1/messages` |
+| auth header | `Authorization: Bearer` | `x-api-key` + `anthropic-version` |
+| usage fields | `prompt_tokens` / `completion_tokens` | `input_tokens` / `output_tokens` |
+| reply shape | `choices[0].message.content` | `content[]` blocks |
+
+By default `--protocol auto` probes `/v1/models` first. If it answers (200 or 401) you get the [OI] path. If it 404s, the tool falls back to an Anthropic-shaped request.
+
+Force it explicitly when you know:
+
+```bash
+# Claude Code talks the Anthropic protocol natively
+relay-probe check --url https://api.example.com --key sk-ant-xxx \
+  --model claude-sonnet-4-5 --protocol anthropic
+```
+
+Note that Anthropic has no `/v1/models` equivalent, so the "models endpoint" check is skipped in that mode rather than reported as a failure.
+
 ### `all` — everything
 
 ```bash
@@ -137,6 +160,7 @@ Runs `check` + `tokens` + streaming + `bench` in one pass.
 | `--n` | `5` | request count for `bench` |
 | `--concurrency` | `1` | parallel requests for `bench` |
 | `--timeout` | `30000` | per-request timeout in ms |
+| `--protocol` | `auto` | `auto` / `openai` / `anthropic` |
 | `--json` | off | machine-readable output, one object |
 | `--no-color` | off | disable ANSI colors (also auto-off when not a TTY) |
 
@@ -198,7 +222,7 @@ The web versions do the same checks in-browser (subject to CORS) and can generat
 
 ## Tests
 
-16 tests covering every failure mode the tool claims to detect. They run against a local mock server, so no API key or network access is required.
+22 tests covering every failure mode the tool claims to detect. They run against a local mock server, so no API key or network access is required.
 
 ```bash
 npm test
@@ -222,7 +246,7 @@ ok 14 - missing --url exits non-zero with a message
 ok 15 - unknown command exits non-zero
 ok 16 - --version prints the version
 
-# pass 16  # fail 0
+# pass 22  # fail 0
 ```
 
 CI runs the suite on **3 operating systems × 3 Node versions** (18/20/22), plus a smoke job that verifies the CLI surface and that the package stays dependency-free.

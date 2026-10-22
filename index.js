@@ -11,7 +11,7 @@
  *   npx relay-probe all    --url ... --key ...
  */
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 // ---------- args ----------
 
@@ -45,6 +45,7 @@ const N = parseInt(args.n || '5', 10);
 const CONC = parseInt(args.concurrency || '1', 10);
 const TIMEOUT = parseInt(args.timeout || '30000', 10);
 const JSON_OUT = !!args.json;
+const PROTOCOL = String(args.protocol || 'auto').toLowerCase(); // auto | openai | anthropic
 
 // ---------- colors ----------
 
@@ -80,6 +81,106 @@ function normalizeBase(input) {
   };
 }
 
+/**
+ * Send a chat request in the given protocol.
+ *   openai    -> POST {base}/v1/chat/completions,  Authorization: Bearer
+ *   anthropic -> POST {base}/v1/messages,          x-api-key + anthropic-version
+ */
+async function chatProto(proto, base, key, model, content, { maxTokens = 64, timeout = TIMEOUT } = {}) {
+  if (proto === 'anthropic') {
+    return callJson(`${base.root}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        messages: [{ role: 'user', content }],
+      }),
+      timeout,
+    });
+  }
+  return callJson(`${base.openai}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'user', content }],
+      max_tokens: maxTokens,
+    }),
+    timeout,
+  });
+}
+
+/** Extract a text reply and usage from either protocol's response shape. */
+function extractReply(json, proto) {
+  if (!json) return { text: '', usage: null, model: null };
+  if (proto === 'anthropic') {
+    const blocks = Array.isArray(json.content) ? json.content : [];
+    const text = blocks.filter(b => b.type === 'text').map(b => b.text).join('');
+    return {
+      text,
+      usage: json.usage
+        ? {
+            pin: json.usage.input_tokens,
+            pout: json.usage.output_tokens,
+            ptotal: (json.usage.input_tokens || 0) + (json.usage.output_tokens || 0),
+            cached: json.usage.cache_read_input_tokens,
+          }
+        : null,
+      model: json.model || null,
+    };
+  }
+  const choice = json.choices && json.choices[0];
+  const text = (choice && choice.message && choice.message.content) || '';
+  const u = json.usage;
+  return {
+    text,
+    usage: u
+      ? { pin: u.prompt_tokens, pout: u.completion_tokens, ptotal: u.total_tokens,
+          cached: (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) ||
+                  (u.input_tokens_details && u.input_tokens_details.cache_read_input_tokens) }
+      : null,
+    model: json.model || null,
+  };
+}
+
+/** Decide which protocol to use. */
+async function detectProtocol(base, key) {
+  if (PROTOCOL === 'openai' || PROTOCOL === 'anthropic') {
+    record('protocol', 'ok', PROTOCOL + ' (forced via --protocol)');
+    return PROTOCOL;
+  }
+  // auto: try the cheapest signal first
+  const r = await callJson(`${base.openai}/models`, {
+    headers: { Authorization: `Bearer ${key}` },
+    timeout: 12000,
+  });
+  if (r.status === 200 || r.status === 401) {
+    record('protocol', 'ok', 'openai (detected: /v1/models responded ' + r.status + ')');
+    return 'openai';
+  }
+  // try an anthropic-shaped probe
+  const a = await callJson(`${base.root}/v1/messages`, {
+    method: 'POST',
+    headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: MODEL_ARG, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+    timeout: 12000,
+  });
+  if (a.status && a.status !== 404) {
+    record('protocol', 'ok', 'anthropic (detected: /v1/messages responded ' + a.status + ')');
+    return 'anthropic';
+  }
+  record('protocol', 'warn', 'could not detect; assuming openai');
+  return 'openai';
+}
+
 // ---------- http ----------
 
 async function callJson(url, { method = 'GET', headers = {}, body, timeout = TIMEOUT } = {}) {
@@ -111,6 +212,7 @@ async function callJson(url, { method = 'GET', headers = {}, body, timeout = TIM
 // ---------- report helpers ----------
 
 const results = [];
+let activeProtocol = 'openai';
 function record(name, level, message) {
   results.push({ name, level, message });
 }
@@ -173,21 +275,8 @@ async function checkModelPresent(modelIds, model) {
   }
 }
 
-async function chat(base, key, model, content, { maxTokens = 64, timeout = TIMEOUT } = {}) {
-  const body = JSON.stringify({
-    model,
-    messages: [{ role: 'user', content }],
-    max_tokens: maxTokens,
-  });
-  return callJson(`${base.openai}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${key}`,
-      'Content-Type': 'application/json',
-    },
-    body,
-    timeout,
-  });
+async function chat(base, key, model, content, opts = {}) {
+  return chatProto(activeProtocol, base, key, model, content, opts);
 }
 
 async function checkChat(base, key, model) {
@@ -198,23 +287,20 @@ async function checkChat(base, key, model) {
     return null;
   }
   if (!r.ok) {
-    const msg = r.json?.error?.message || r.text.slice(0, 120);
+    const msg =
+      (r.json && r.json.error && r.json.error.message) || r.text.slice(0, 120);
     record('chat completion', 'bad', `HTTP ${r.status} - ${msg}`);
     return null;
   }
 
-  const choice = r.json?.choices?.[0];
-  const text = choice?.message?.content ?? '';
+  const { text, usage, model: echoed } = extractReply(r.json, activeProtocol);
   record('chat completion', 'ok', `${r.ms}ms, ${text.length} chars back`);
 
-  if (!choice) {
-    record('response shape', 'bad', 'no choices[] in response');
-  } else if (!text) {
-    record('response shape', 'warn', 'choices[0].message.content is empty');
+  if (!text) {
+    record('response shape', 'warn', 'reply text is empty');
   }
 
   // model echo
-  const echoed = r.json?.model;
   if (echoed) {
     if (echoed === model) {
       record('model echo', 'ok', `response reports "${echoed}"`);
@@ -226,13 +312,10 @@ async function checkChat(base, key, model) {
   }
 
   // usage
-  const u = r.json?.usage;
-  if (!u) {
+  if (!usage) {
     record('usage block', 'bad', 'no usage{} - cannot verify billing');
   } else {
-    const pin = u.prompt_tokens ?? u.input_tokens;
-    const pout = u.completion_tokens ?? u.output_tokens;
-    const ptotal = u.total_tokens;
+    const { pin, pout, ptotal } = usage;
     if (typeof pin !== 'number' || typeof pout !== 'number') {
       record('usage block', 'warn', 'usage present but missing input/output counts');
     } else {
@@ -242,14 +325,10 @@ async function checkChat(base, key, model) {
       } else if (ptotal !== undefined) {
         record('usage math', 'ok', 'in + out = total');
       }
+      if (usage.cached !== undefined && usage.cached !== null) {
+        record('cache accounting', 'ok', `cached tokens reported (${usage.cached})`);
+      }
     }
-  }
-
-  // cache fields
-  const details = u?.prompt_tokens_details || u?.input_tokens_details;
-  if (details && (details.cached_tokens !== undefined || details.cache_read_input_tokens !== undefined)) {
-    const cached = details.cached_tokens ?? details.cache_read_input_tokens;
-    record('cache accounting', 'ok', `cached_tokens reported (${cached})`);
   }
 
   return r;
@@ -275,10 +354,10 @@ async function checkTokenAccounting(base, key, model) {
     record('token accounting', 'bad', r.error || `HTTP ${r.status}`);
     return;
   }
-  const u = r.json?.usage || {};
-  const pin = u.prompt_tokens ?? u.input_tokens;
+  const u = extractReply(r.json, activeProtocol).usage;
+  const pin = u ? u.pin : undefined;
   if (typeof pin !== 'number') {
-    record('token accounting', 'bad', 'no prompt_tokens in usage');
+    record('token accounting', 'bad', 'no input token count in usage');
     return;
   }
   // ~10 chars/token for this English text → expected ~90 for 900 chars
@@ -339,29 +418,34 @@ async function checkStreaming(base, key, model) {
   let firstChunkMs = null;
   let chunks = 0;
   try {
-    const res = await fetch(`${base.openai}/chat/completions`, {
+    const isA = activeProtocol === 'anthropic';
+    const url = isA ? `${base.root}/v1/messages` : `${base.openai}/chat/completions`;
+    const headers = isA
+      ? { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
+      : { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' };
+    const payload = isA
+      ? { model, max_tokens: 32, stream: true, messages: [{ role: 'user', content: 'Count 1 to 5.' }] }
+      : { model, max_tokens: 32, stream: true, messages: [{ role: 'user', content: 'Count 1 to 5.' }] };
+
+    const res = await fetch(url, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: 'Count 1 to 5.' }],
-        max_tokens: 32,
-        stream: true,
-      }),
+      headers,
+      body: JSON.stringify(payload),
       signal: ctrl.signal,
     });
     if (!res.ok) {
       record('streaming', 'warn', `HTTP ${res.status} - stream not accepted`);
       return;
     }
-    const reader = res.body?.getReader();
+    const reader = res.body && res.body.getReader();
     if (!reader) { record('streaming', 'warn', 'no response body'); return; }
     const dec = new TextDecoder();
+    const needle = isA ? 'event:' : 'data:';
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       if (firstChunkMs === null) firstChunkMs = Date.now() - t0;
-      chunks += (dec.decode(value).match(/data:/g) || []).length;
+      chunks += (dec.decode(value).match(new RegExp(needle, 'g')) || []).length;
     }
     record('streaming', 'ok', `first chunk ${firstChunkMs}ms, ${chunks} event(s)`);
   } catch (e) {
@@ -376,24 +460,34 @@ async function checkStreaming(base, key, model) {
 async function cmdCheck(base, key, model) {
   const reachable = await checkReach(base);
   if (!reachable) return;
-  const ids = await checkModels(base, key);
-  await checkModelPresent(ids, model);
+  activeProtocol = await detectProtocol(base, key);
+  if (activeProtocol === 'openai') {
+    const ids = await checkModels(base, key);
+    await checkModelPresent(ids, model);
+  }
+  // anthropic protocol has no /v1/models - nothing to check, don't emit a warning
   await checkChat(base, key, model);
 }
 
 async function cmdTokens(base, key, model) {
+  activeProtocol = await detectProtocol(base, key);
   await checkChat(base, key, model);
   await checkTokenAccounting(base, key, model);
 }
 
 async function cmdBench(base, key, model) {
+  activeProtocol = await detectProtocol(base, key);
   await bench(base, key, model, N, CONC);
 }
 
 async function cmdAll(base, key, model) {
   await checkReach(base);
-  const ids = await checkModels(base, key);
-  await checkModelPresent(ids, model);
+  activeProtocol = await detectProtocol(base, key);
+  if (activeProtocol === 'openai') {
+    const ids = await checkModels(base, key);
+    await checkModelPresent(ids, model);
+  }
+  // anthropic protocol has no /v1/models
   await checkChat(base, key, model);
   await checkTokenAccounting(base, key, model);
   await checkStreaming(base, key, model);
@@ -422,6 +516,7 @@ ${c.bold('Options')}
   --n <count>            requests for bench (default 5)
   --concurrency <n>      parallel requests for bench (default 1)
   --timeout <ms>         per-request timeout (default 30000)
+  --protocol <p>         auto | openai | anthropic (default auto)
   --json                 machine-readable output
   --no-color             disable colors
 
@@ -430,6 +525,10 @@ ${c.bold('Examples')}
 
   relay-probe bench --url https://api.example.com/v1 --key sk-xxx \\
     --model gpt-4o-mini --n 20 --concurrency 5
+
+  # Claude Code style native Anthropic endpoint
+  relay-probe check --url https://api.example.com --key sk-ant-xxx \\
+    --model claude-sonnet-4-5 --protocol anthropic
 
 ${c.bold('Env vars')}
   RELAY_URL, RELAY_KEY, RELAY_MODEL
@@ -463,6 +562,7 @@ async function main() {
     console.log(c.bold('relay-probe') + c.dim(` v${VERSION}`));
     console.log(c.dim('  endpoint  ') + base.root + (base.hadV1 ? c.dim('  (trailing /v1 normalized)') : ''));
     console.log(c.dim('  openai    ') + base.openai);
+    console.log(c.dim('  protocol  ') + PROTOCOL);
     console.log(c.dim('  model     ') + MODEL_ARG);
     console.log('');
   }
