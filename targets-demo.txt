@@ -1,0 +1,3 @@
+﻿# name | url | key | model
+97wl-live | https://api.97wl.cc | sk-invalid-demo | test-model
+bad-host | https://this-host-does-not-exist-12345.example | sk-x | test-model

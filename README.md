@@ -140,6 +140,35 @@ relay-probe check --url https://api.example.com --key sk-ant-xxx \
 
 Note that Anthropic has no `/v1/models` equivalent, so the "models endpoint" check is skipped in that mode rather than reported as a failure.
 
+### `compare` — several endpoints side by side
+
+When you're choosing between two or three relays, run them all at once:
+
+```bash
+relay-probe compare --targets targets.txt
+```
+
+`targets.txt`, one per line, `#` for comments:
+
+```
+# name | url | key | model
+relay-a | https://api.a.com | sk-aaa | gpt-4o-mini
+relay-b | https://api.b.com | sk-bbb | 
+relay-c | https://api.c.com/v1 | sk-ccc | 
+```
+
+```
+relay-probe compare  3 targets
+
+  name                  verdict  proto      reach      chat  checks
+  -----------------------------------------------------------------
+  relay-a               PASS     openai     200        891ms       7
+  relay-b               WARN     anthropic  200        1204ms      6
+  relay-c               FAIL     openai     -           -           1
+```
+
+Exit code is 1 if any target fails, so it works as a pre-commit check.
+
 ### `all` — everything
 
 ```bash

@@ -9,9 +9,11 @@
  *   npx relay-probe tokens --url ... --key ... --model ...
  *   npx relay-probe bench  --url ... --key ... --model ... --n 10 --concurrency 3
  *   npx relay-probe all    --url ... --key ...
+ *   npx relay-probe compare --targets targets.txt   (name | url | key | model)
  */
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
+const fs = require('node:fs');
 
 // ---------- args ----------
 
@@ -207,6 +209,98 @@ async function callJson(url, { method = 'GET', headers = {}, body, timeout = TIM
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ---------- compare ----------
+
+/**
+ * Run `check` against every target in a file and print a comparison table.
+ *
+ * File format, one target per line, `#` starts a comment:
+ *   name | url | key | model
+ * Lines with 2 or 3 fields are accepted too (model / key optional).
+ */
+async function cmdCompare(file) {
+  if (!file) {
+    console.error(c.red('error:') + ' compare needs --targets <file>');
+    console.error(c.dim('  file format: name | url | key | model'));
+    process.exitCode = 1;
+    return;
+  }
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    console.error(c.red('error:') + ` cannot read ${file}: ${e.message}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const targets = raw
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => l && !l.startsWith('#'))
+    .map(l => {
+      const parts = l.split('|').map(s => s.trim());
+      return { name: parts[0] || 'unnamed', url: parts[1] || '', key: parts[2] || '', model: parts[3] || '' };
+    })
+    .filter(t => t.url);
+
+  if (!targets.length) {
+    console.error(c.red('error:') + ' no usable targets in ' + file);
+    process.exitCode = 1;
+    return;
+  }
+
+  const rows = [];
+  for (const t of targets) {
+    results.length = 0;
+    activeProtocol = PROTOCOL === 'auto' ? 'openai' : PROTOCOL;
+    const base = normalizeBase(t.url);
+    const started = Date.now();
+    try {
+      await cmdCheck(base, t.key, t.model || t.name);
+    } catch (e) {
+      record('unexpected', 'bad', e.message);
+    }
+    const ms = Date.now() - started;
+    const bad = results.filter(r => r.level === 'bad').length;
+    const warn = results.filter(r => r.level === 'warn').length;
+    const reach = results.find(r => r.name === 'reachability');
+    const chat = results.find(r => r.name === 'chat completion');
+    const lat = chat && chat.level === 'ok' ? (chat.message.match(/(\d+)ms/) || [])[1] : '';
+    rows.push({
+      name: t.name,
+      verdict: bad ? 'FAIL' : warn ? 'WARN' : 'PASS',
+      protocol: activeProtocol,
+      reach: reach ? (reach.message.match(/HTTP (\d+)/) || [])[1] || '-' : '-',
+      latency: lat || '-',
+      checks: results.length,
+      totalMs: ms,
+    });
+  }
+
+  if (JSON_OUT) {
+    console.log(JSON.stringify({ command: 'compare', targets: rows }, null, 2));
+    process.exitCode = rows.some(r => r.verdict === 'FAIL') ? 1 : 0;
+    return;
+  }
+
+  const pad = (s, n) => String(s).padEnd(n);
+  const padL = (s, n) => String(s).padStart(n);
+  console.log('');
+  console.log(c.bold('relay-probe compare') + c.dim(`  ${rows.length} targets`));
+  console.log('');
+  console.log('  ' + pad('name', 22) + pad('verdict', 9) + pad('proto', 11) + pad('reach', 7) + padL('chat', 8) + padL('checks', 8));
+  console.log('  ' + '-'.repeat(65));
+  for (const r of rows) {
+    const raw = r.verdict;
+    const coloured = r.verdict === 'PASS' ? c.green(raw) : r.verdict === 'WARN' ? c.yellow(raw) : c.red(raw);
+    const cell = coloured + ' '.repeat(Math.max(0, 9 - raw.length));
+    console.log('  ' + pad(r.name, 22) + cell + pad(r.protocol, 11) + pad(r.reach, 7) + padL(r.latency ? r.latency + 'ms' : '-', 8) + padL(r.checks, 8));
+  }
+  console.log('');
+  process.exitCode = rows.some(r => r.verdict === 'FAIL') ? 1 : 0;
 }
 
 // ---------- report helpers ----------
@@ -530,6 +624,10 @@ ${c.bold('Examples')}
   relay-probe check --url https://api.example.com --key sk-ant-xxx \\
     --model claude-sonnet-4-5 --protocol anthropic
 
+  # test several endpoints at once and print a comparison table
+  relay-probe compare --targets targets.txt
+  # targets.txt:  name | url | key | model
+
 ${c.bold('Env vars')}
   RELAY_URL, RELAY_KEY, RELAY_MODEL
 
@@ -540,6 +638,12 @@ ${c.dim('Exit codes: 0 = all checks passed, 1 = at least one failure')}
 async function main() {
   if (args.help || args.h || cmd === 'help') { usage(); return; }
   if (args.version || args.v) { console.log(VERSION); return; }
+
+  // compare mode takes its targets from a file, no --url needed
+  if (cmd === 'compare') {
+    await cmdCompare(args.targets || args.file);
+    return;
+  }
 
   if (!URL_ARG) {
     console.error(c.red('error:') + ' --url is required (or set RELAY_URL)');

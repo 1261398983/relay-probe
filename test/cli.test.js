@@ -239,3 +239,49 @@ test('--version prints the version', async () => {
   assert.strictEqual(r.code, 0);
   assert.match(r.stdout.trim(), /^\d+\.\d+\.\d+$/);
 });
+
+// ---------- compare ----------
+
+test('compare: two targets, one reachable one not, table has both rows', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const file = path.join(os.tmpdir(), 'relay-probe-targets.txt');
+  fs.writeFileSync(file, [
+    `good | ${baseUrl}/ok | sk-test | test-model`,
+    `bad  | http://127.0.0.1:1 | sk-test | test-model`,
+  ].join('\n'), 'utf8');
+
+  const r = await run(['compare', '--targets', file, '--no-color']);
+  fs.unlinkSync(file);
+  assert.match(r.stdout, /relay-probe compare/);
+  assert.match(r.stdout, /good/);
+  assert.match(r.stdout, /bad/);
+  assert.strictEqual(r.code, 1, 'expected exit 1 because one target fails');
+});
+
+test('compare: --json emits a targets array', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const file = path.join(os.tmpdir(), 'relay-probe-targets2.txt');
+  fs.writeFileSync(file, `only | ${baseUrl}/ok | sk-test | test-model`, 'utf8');
+
+  const r = await run(['compare', '--targets', file, '--json']);
+  fs.unlinkSync(file);
+  assert.ok(Array.isArray(r.json.targets), 'targets should be an array');
+  assert.strictEqual(r.json.targets.length, 1);
+  assert.strictEqual(r.json.targets[0].name, 'only');
+  assert.strictEqual(r.json.targets[0].verdict, 'PASS');
+  assert.strictEqual(r.code, 0);
+});
+
+test('compare: missing --targets fails cleanly', async () => {
+  const r = await run(['compare']);
+  assert.strictEqual(r.code, 1);
+  assert.match(r.stderr, /--targets/);
+});
+
+test('compare: nonexistent file fails cleanly', async () => {
+  const r = await run(['compare', '--targets', '/nope/does-not-exist.txt']);
+  assert.strictEqual(r.code, 1);
+  assert.match(r.stderr, /cannot read/);
+});

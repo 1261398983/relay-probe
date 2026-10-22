@@ -1,7 +1,7 @@
 {
   "name": "relay-probe",
-  "version": "0.2.0",
-  "description": "Test any [OI]- or Anthropic-compatible API endpoint: auth, model identity, token inflation, streaming, latency percentiles. Zero dependencies.",
+  "version": "0.3.0",
+  "description": "Test any [OI]- or Anthropic-compatible API endpoint: auth, model identity, token inflation, streaming, latency percentiles, multi-endpoint comparison. Zero dependencies.",
   "type": "commonjs",
   "main": "index.js",
   "bin": {
