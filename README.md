@@ -1,5 +1,9 @@
 # relay-probe
 
+[![test](https://github.com/1261398983/relay-probe/actions/workflows/test.yml/badge.svg)](https://github.com/1261398983/relay-probe/actions/workflows/test.yml)
+[![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](package.json)
+[![node](https://img.shields.io/badge/node-%3E%3D18-blue)](package.json)
+
 **Test any [OI]-compatible or Anthropic-compatible API endpoint in one command.**
 
 Zero dependencies. Node 18+. Works with OpenAI, Claude, Gemini relays, or any gateway that speaks the [OI] chat-completions protocol.
@@ -189,6 +193,50 @@ Written while evaluating API relays for a small project. If you find this useful
 - **Relay checker (web version)** — https://1261398983.github.io/ai-api-guide/checker/
 
 The web versions do the same checks in-browser (subject to CORS) and can generate copy-paste `curl` commands when CORS blocks them.
+
+---
+
+## Tests
+
+16 tests covering every failure mode the tool claims to detect. They run against a local mock server, so no API key or network access is required.
+
+```bash
+npm test
+```
+
+```
+ok 1  - accepts base URL without /v1
+ok 2  - normalizes a trailing /v1
+ok 3  - normalizes a trailing slash
+ok 4  - happy path: every check passes
+ok 5  - bad key: 401 is reported as a failure
+ok 6  - missing usage block is flagged
+ok 7  - wrong model echo is flagged as a warning
+ok 8  - absent models endpoint is a warning, not a failure
+ok 9  - honest token counts pass
+ok 10 - inflated token counts are caught
+ok 11 - bench reports latency percentiles
+ok 12 - bench p95 is never below p50
+ok 13 - streaming is detected
+ok 14 - missing --url exits non-zero with a message
+ok 15 - unknown command exits non-zero
+ok 16 - --version prints the version
+
+# pass 16  # fail 0
+```
+
+CI runs the suite on **3 operating systems × 3 Node versions** (18/20/22), plus a smoke job that verifies the CLI surface and that the package stays dependency-free.
+
+The mock server (`test/mock-server.js`) can be started standalone if you want to poke at it:
+
+```bash
+node test/mock-server.js 8787
+# then, in another shell:
+node index.js all --url http://127.0.0.1:8787/ok --key sk-test --model test-model
+
+# other modes: /badkey /inflate /nousage /wrongmodel /nomodels
+node index.js tokens --url http://127.0.0.1:8787/inflate --key sk-test --model test-model
+```
 
 ---
 

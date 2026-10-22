@@ -1,0 +1,65 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: ['18', '20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Show version
+        run: node --version
+
+      - name: Run test suite
+        run: node --test test/cli.test.js
+
+  smoke:
+    name: smoke test the published CLI shape
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: --help exits 0 and mentions every command
+        run: |
+          set -e
+          out=$(node index.js --help)
+          echo "$out"
+          for c in check tokens bench all; do
+            echo "$out" | grep -q "$c" || { echo "missing command: $c"; exit 1; }
+          done
+
+      - name: --version prints semver
+        run: |
+          v=$(node index.js --version)
+          echo "$v"
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+
+      - name: missing --url fails with exit 1
+        run: |
+          set +e
+          node index.js check 2>err.txt
+          code=$?
+          cat err.txt
+          [ "$code" -eq 1 ] || { echo "expected exit 1, got $code"; exit 1; }
+          grep -q -- '--url is required' err.txt
+
+      - name: package has no dependencies
+        run: node -e "const p=require('./package.json'); if(Object.keys(p.dependencies||{}).length) { console.error('deps found'); process.exit(1); } console.log('zero deps ok');"
