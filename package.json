@@ -1,0 +1,44 @@
+{
+  "name": "relay-probe",
+  "version": "0.1.0",
+  "description": "Test any [OI]-compatible API endpoint: auth, model identity, token accounting, streaming, latency. Zero dependencies.",
+  "type": "commonjs",
+  "main": "index.js",
+  "bin": {
+    "relay-probe": "index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "api",
+    "proxy",
+    "relay",
+    "gateway",
+    "llm",
+    "claude",
+    "gpt",
+    "openai",
+    "diagnostics",
+    "latency",
+    "benchmark",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1261398983/relay-probe.git"
+  },
+  "bugs": {
+    "url": "https://github.com/1261398983/relay-probe/issues"
+  },
+  "homepage": "https://github.com/1261398983/relay-probe#readme"
+}
